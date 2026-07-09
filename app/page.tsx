@@ -689,11 +689,8 @@ export default function Home() {
         {/* Barra de ações */}
         <div className="action-bar">
           <div className="action-btns">
-            <button className="btn-action btn-pdf" onClick={handlePDF} disabled={pdfLoading}>
-              {pdfLoading ? <span className="spinner" /> : '📥'} Baixar PDF
-            </button>
-            <button className="btn-action btn-wpp" onClick={handleWhatsApp}>
-              💬 WhatsApp
+            <button className="btn-action btn-pdf" onClick={handlePDF} disabled={pdfLoading} style={{ flex: 1 }}>
+              {pdfLoading ? <span className="spinner" /> : '📥'} BAIXAR MEU PLANO EM PDF
             </button>
             <button
               className="btn-action btn-regen"
