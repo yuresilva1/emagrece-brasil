@@ -3,16 +3,6 @@
 import { useState, useEffect, useRef } from 'react'
 import Image from 'next/image'
 
-interface PdfUpload {
-  id: string
-  filename: string
-  pdf_type: string
-  recipes_count: number
-  processed: boolean
-  error_msg?: string
-  created_at: string
-}
-
 interface UploadResult {
   success?: boolean
   warning?: string
@@ -24,19 +14,38 @@ interface UploadResult {
 }
 
 export default function AdminPage() {
-  const [password, setPassword]   = useState('')
-  const [authed, setAuthed]       = useState(false)
-  const [authErr, setAuthErr]     = useState(false)
-  const [uploads, setUploads]     = useState<PdfUpload[]>([])
-  const [uploading, setUploading] = useState(false)
-  const [results, setResults]     = useState<UploadResult[]>([])
-  const [pdfType, setPdfType]     = useState<'fit' | 'detox'>('fit')
-  const [totalRecipes, setTotal]  = useState(0)
+  const [password, setPassword]       = useState('')
+  const [authed, setAuthed]           = useState(false)
+  const [authErr, setAuthErr]         = useState(false)
+  const [uploading, setUploading]     = useState(false)
+  const [statusMsg, setStatusMsg]     = useState('')
+  const [results, setResults]         = useState<UploadResult[]>([])
+  const [pdfType, setPdfType]         = useState<'fit' | 'detox'>('fit')
+  const [totalRecipes, setTotal]      = useState(0)
+  const [pdfjsLoaded, setPdfjsLoaded] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Tenta carregar o PDF.js do CDN no mount
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !(window as any)['pdfjs-dist/build/pdf']) {
+      const script = document.createElement('script')
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+      script.onload = () => {
+        const pdfjsLib = (window as any)['pdfjs-dist/build/pdf']
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+        setPdfjsLoaded(true)
+      }
+      script.onerror = () => {
+        console.error('Erro ao carregar PDF.js')
+      }
+      document.head.appendChild(script)
+    } else {
+      setPdfjsLoaded(true)
+    }
+  }, [])
 
   // Tenta autenticar com a senha digitada
   function handleAuth() {
-    // Comparamos com uma senha simples no client (o header real vai ao servidor)
     if (password.trim().length >= 4) {
       setAuthed(true)
       loadUploads()
@@ -54,6 +63,29 @@ export default function AdminPage() {
     } catch {}
   }
 
+  // Função para extrair texto do PDF no navegador (evita limites de upload de arquivos grandes)
+  async function extractTextFromPdf(file: File, onProgress: (msg: string) => void): Promise<string> {
+    const pdfjsLib = (window as any)['pdfjs-dist/build/pdf']
+    if (!pdfjsLib) {
+      throw new Error('Biblioteca PDF.js não carregada. Tente recarregar a página.')
+    }
+
+    onProgress('Carregando arquivo...')
+    const arrayBuffer = await file.arrayBuffer()
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+    let fullText = ''
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      onProgress(`Extraindo página ${i} de ${pdf.numPages}...`)
+      const page = await pdf.getPage(i)
+      const textContent = await page.getTextContent()
+      const pageText = textContent.items.map((item: any) => item.str).join(' ')
+      fullText += pageText + '\n\n'
+    }
+
+    return fullText
+  }
+
   async function handleUpload() {
     const files = fileRef.current?.files
     if (!files || files.length === 0) return
@@ -64,33 +96,41 @@ export default function AdminPage() {
 
     for (const file of Array.from(files)) {
       try {
-        const fd = new FormData()
-        fd.append('file', file)
-        fd.append('type', pdfType)
+        setStatusMsg(`Lendo: ${file.name}...`)
+        
+        // 1. Extrai o texto do PDF localmente
+        const text = await extractTextFromPdf(file, (msg) => {
+          setStatusMsg(`[${file.name}] ${msg}`)
+        })
 
+        setStatusMsg(`Enviando dados para o servidor...`)
+
+        // 2. Envia o texto extraído por JSON
         const r = await fetch('/api/upload', {
           method: 'POST',
-          headers: { 'x-admin-password': password },
-          body: fd,
+          headers: { 
+            'x-admin-password': password,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            text,
+            type: pdfType,
+            filename: file.name
+          }),
         })
 
         const data: UploadResult = await r.json()
         newResults.push(data)
-      } catch {
-        newResults.push({ error: `Erro ao enviar ${file.name}` })
+      } catch (err: any) {
+        newResults.push({ error: `Erro em ${file.name}: ${err.message || 'Falha ao processar'}` })
       }
     }
 
     setResults(newResults)
     setUploading(false)
+    setStatusMsg('')
     if (fileRef.current) fileRef.current.value = ''
     loadUploads()
-  }
-
-  async function clearRecipes() {
-    if (!confirm('Apagar TODAS as receitas do banco? Isso não pode ser desfeito.')) return
-    // Chama endpoint de limpeza (a implementar) ou usa Supabase dashboard
-    alert('Para apagar, acesse o Supabase Dashboard > Table Editor > recipes > Delete all rows.')
   }
 
   if (!authed) {
@@ -152,8 +192,8 @@ export default function AdminPage() {
         <div style={{ background: '#fff', borderRadius: 14, padding: 20, border: '1px solid #e2e8f0', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,.06)' }}>
           <h2 style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>📄 Importar PDFs de Receitas</h2>
           <p style={{ fontSize: 12, color: '#64748b', marginBottom: 16, lineHeight: 1.6 }}>
-            Faça upload dos PDFs. O sistema irá extrair as receitas automaticamente.<br />
-            <strong>Dica:</strong> PDFs com a estrutura <em>Nome da Receita → Ingredientes → Modo de Preparo</em> funcionam melhor.
+            Extraímos o texto do PDF no seu próprio navegador e enviamos de forma segura ao banco. 
+            Isso permite ler arquivos grandes sem dar erro!
           </p>
 
           {/* Tipo do PDF */}
@@ -182,12 +222,15 @@ export default function AdminPage() {
           <div
             style={{
               border: '2px dashed #bbf7d0', borderRadius: 10, padding: '24px 16px',
-              textAlign: 'center', cursor: 'pointer', background: '#f8fffe', marginBottom: 14
+              textAlign: 'center', cursor: pdfjsLoaded ? 'pointer' : 'not-allowed', background: '#f8fffe', marginBottom: 14,
+              opacity: pdfjsLoaded ? 1 : 0.6
             }}
-            onClick={() => fileRef.current?.click()}
+            onClick={() => pdfjsLoaded && fileRef.current?.click()}
           >
             <div style={{ fontSize: 32, marginBottom: 8 }}>📁</div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Clique para selecionar os PDFs</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>
+              {pdfjsLoaded ? 'Clique para selecionar os PDFs' : 'Carregando biblioteca do leitor...'}
+            </div>
             <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>Pode selecionar múltiplos arquivos</div>
             <input
               ref={fileRef}
@@ -195,30 +238,33 @@ export default function AdminPage() {
               accept=".pdf"
               multiple
               style={{ display: 'none' }}
-              onChange={e => {
-                const names = Array.from(e.target.files || []).map(f => f.name).join(', ')
-                // atualiza UI indiretamente
-              }}
+              disabled={!pdfjsLoaded}
             />
           </div>
 
+          {statusMsg && (
+            <div style={{ padding: '10px 12px', background: '#e0f2fe', color: '#0369a1', borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
+              🔄 {statusMsg}
+            </div>
+          )}
+
           <button
             onClick={handleUpload}
-            disabled={uploading}
+            disabled={uploading || !pdfjsLoaded}
             style={{
               width: '100%', padding: 14, borderRadius: 10,
-              background: uploading ? '#86efac' : 'linear-gradient(135deg,#22c55e,#16a34a)',
+              background: (uploading || !pdfjsLoaded) ? '#86efac' : 'linear-gradient(135deg,#22c55e,#16a34a)',
               border: 'none', color: 'white', fontWeight: 700, fontSize: 15,
-              cursor: uploading ? 'not-allowed' : 'pointer', fontFamily: 'Inter, sans-serif',
+              cursor: (uploading || !pdfjsLoaded) ? 'not-allowed' : 'pointer', fontFamily: 'Inter, sans-serif',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
             }}
           >
             {uploading ? (
               <>
                 <span style={{ width: 18, height: 18, border: '2.5px solid rgba(255,255,255,.4)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin .7s linear infinite', display: 'inline-block' }} />
-                Processando PDFs...
+                Processando...
               </>
-            ) : '⬆️ Fazer Upload e Importar Receitas'}
+            ) : '⬆️ Extrair e Importar Receitas'}
           </button>
         </div>
 
@@ -233,17 +279,20 @@ export default function AdminPage() {
                 border: `1px solid ${r.success ? '#bbf7d0' : r.warning ? '#fde68a' : '#fecaca'}`
               }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: r.success ? '#16a34a' : r.warning ? '#92400e' : '#dc2626', marginBottom: 4 }}>
-                  {r.success ? `✅ ${r.filename}` : r.warning ? `⚠️ ${r.filename}` : `❌ ${r.error}`}
+                  {r.success ? `✅ ${r.filename}` : r.warning ? `⚠️ Sem receitas identificadas` : `❌ Erro`}
                 </div>
-                {r.recipesFound !== undefined && (
+                {r.success && r.recipesFound !== undefined && (
                   <div style={{ fontSize: 12, color: '#64748b' }}>
-                    {r.recipesFound} receitas encontradas
+                    {r.recipesFound} receitas encontradas e inseridas no banco!
                     {r.categories && (
-                      <span> — {Object.entries(r.categories).map(([k, v]) => `${k}: ${v}`).join(' • ')}</span>
+                      <div style={{ marginTop: 4, fontStyle: 'italic' }}>
+                        {Object.entries(r.categories).map(([k, v]) => `${k}: ${v}`).join(' • ')}
+                      </div>
                     )}
                   </div>
                 )}
-                {r.hint && <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>{r.hint}</div>}
+                {r.warning && <div style={{ fontSize: 12, color: '#64748b' }}>{r.warning}. {r.hint}</div>}
+                {r.error && <div style={{ fontSize: 12, color: '#dc2626' }}>{r.error}</div>}
               </div>
             ))}
           </div>
@@ -259,12 +308,6 @@ export default function AdminPage() {
             <li>As receitas ficam salvas no banco Supabase</li>
             <li>Todos os usuários do app verão as novas receitas em até 1h</li>
           </ol>
-          <div style={{ marginTop: 14, padding: '10px 14px', background: '#f0fdf4', borderRadius: 8, fontSize: 12, color: '#16a34a', fontWeight: 600 }}>
-            💡 Para gerenciar receitas individualmente, acesse o{' '}
-            <a href="https://supabase.com/dashboard" target="_blank" rel="noopener" style={{ color: '#16a34a' }}>
-              Supabase Dashboard → Table Editor → recipes
-            </a>
-          </div>
         </div>
 
       </div>

@@ -134,7 +134,8 @@ export default function Home() {
             setNutrition(nd)
 
             // Usa receitas do banco ou as padrão
-            const recipeData = recipes || getDefaultRecipes()
+            const dbCount = recipes ? Object.values(recipes).reduce((a, b) => a + b.length, 0) : 0
+            const recipeData = dbCount > 0 ? recipes! : getDefaultRecipes()
             const p = generatePlan(ud, nd, recipeData, form.dias)
             setPlan(p)
             setCurrentDay(0)

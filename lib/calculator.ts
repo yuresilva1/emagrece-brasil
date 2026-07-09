@@ -14,6 +14,8 @@ export interface UserData {
   waist?: number   // cm (opcional)
   hip?: number     // cm (opcional)
   arm?: number     // cm (opcional)
+  kgPerder?: number // opcional
+  incomoda?: string[] // opcional
 }
 
 export interface NutritionData {
@@ -45,13 +47,18 @@ export function calculateTDEE(bmr: number, activityLevel: UserData['activityLeve
   return bmr * (factors[activityLevel] ?? 1.375)
 }
 
-export function calculateTargetCalories(tdee: number, goal: UserData['goal']): number {
-  const factors: Record<UserData['goal'], number> = {
-    lose: 0.80,
-    maintain: 1.0,
-    gain: 1.15
+export function calculateTargetCalories(tdee: number, goal: UserData['goal'], kgPerder?: number): number {
+  let factor = 1.0;
+  if (goal === 'lose') {
+    // Deficit dinâmico: se quer perder mais peso, deficit ligeiramente maior (até 25%)
+    const kg = kgPerder || 10;
+    if (kg > 20) factor = 0.75;      // Deficit de 25%
+    else if (kg > 10) factor = 0.78; // Deficit de 22%
+    else factor = 0.82;              // Deficit de 18%
+  } else if (goal === 'gain') {
+    factor = 1.15;
   }
-  return Math.round(tdee * factors[goal])
+  return Math.round(tdee * factor)
 }
 
 export function calculateBMI(weight: number, height: number) {
@@ -70,13 +77,26 @@ export function calculateBMI(weight: number, height: number) {
   return { value: bmi.toFixed(1), classification, color }
 }
 
-export function calculateMacros(targetCalories: number, goal: UserData['goal']) {
-  const ratios: Record<UserData['goal'], [number, number, number]> = {
-    lose:     [0.35, 0.35, 0.30],
-    maintain: [0.30, 0.40, 0.30],
-    gain:     [0.30, 0.45, 0.25]
+export function calculateMacros(targetCalories: number, goal: UserData['goal'], incomoda?: string[]) {
+  // Ratios padrão [proteína, carbo, gordura]
+  let ratios: [number, number, number] = [0.30, 0.40, 0.30];
+  
+  if (goal === 'lose') {
+    ratios = [0.35, 0.35, 0.30];
+    
+    // Se o foco for definição muscular (coxas, braços, pernas), aumenta proteínas
+    if (incomoda && (incomoda.includes('coxas') || incomoda.includes('bracos') || incomoda.includes('pernas'))) {
+      ratios = [0.40, 0.35, 0.25]; // Proteína alta
+    }
+    // Se o foco for barriga (inchaço), reduz carbo um pouco e foca em gorduras boas + proteínas
+    else if (incomoda && incomoda.includes('barriga')) {
+      ratios = [0.38, 0.32, 0.30]; // Carbo mais baixo
+    }
+  } else if (goal === 'gain') {
+    ratios = [0.30, 0.45, 0.25];
   }
-  const [p, c, f] = ratios[goal]
+  
+  const [p, c, f] = ratios
   return {
     protein: Math.round((targetCalories * p) / 4),
     carbs:   Math.round((targetCalories * c) / 4),
@@ -106,9 +126,9 @@ export function calculateIdealWeight(height: number, sex: UserData['sex']): stri
 export function processAll(userData: UserData): NutritionData {
   const bmr = calculateBMR(userData)
   const tdee = calculateTDEE(bmr, userData.activityLevel)
-  const targetCalories = calculateTargetCalories(tdee, userData.goal)
+  const targetCalories = calculateTargetCalories(tdee, userData.goal, userData.kgPerder)
   const bmi = calculateBMI(userData.weight, userData.height)
-  const macros = calculateMacros(targetCalories, userData.goal)
+  const macros = calculateMacros(targetCalories, userData.goal, userData.incomoda)
   const idealWeight = calculateIdealWeight(userData.height, userData.sex)
   const whr = (userData.waist && userData.hip)
     ? calculateWHR(userData.waist, userData.hip, userData.sex)
