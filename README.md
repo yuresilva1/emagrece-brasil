@@ -1,36 +1,86 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🇧🇷 Emagrece Brasil
 
-## Getting Started
+Planejador de alimentação fit personalizado. Gera planos de 5, 10 ou 20 dias com receitas fit e sucos detox, baseado no perfil do usuário.
 
-First, run the development server:
+## Stack
 
+- **Next.js 14** (App Router)
+- **Supabase** (PostgreSQL + Storage)
+- **Vercel** (deploy)
+
+## Como rodar localmente
+
+### 1. Clone e instale
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone <seu-repo>
+cd fit-planner-next
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Configure o Supabase
+1. Crie um projeto em [supabase.com](https://supabase.com)
+2. Vá em **SQL Editor** e execute o arquivo `supabase-schema.sql`
+3. Copie as chaves do projeto em **Settings → API**
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 3. Configure as variáveis de ambiente
+```bash
+cp .env.local.example .env.local
+# Edite .env.local com suas chaves do Supabase
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 4. Rode em desenvolvimento
+```bash
+npm run dev
+```
 
-## Learn More
+Acesse: `http://localhost:3000`
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deploy no Vercel
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Faça push para o GitHub
+2. Importe o repositório no [Vercel](https://vercel.com/new)
+3. Adicione as variáveis de ambiente no painel do Vercel:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `ADMIN_PASSWORD`
+4. Deploy automático! ✅
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Importar os PDFs de Receitas
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Após o deploy, acesse `/admin` e faça upload dos seus PDFs:
+
+1. Acesse `https://seu-app.vercel.app/admin`
+2. Use a senha configurada em `ADMIN_PASSWORD`
+3. Selecione o tipo (Receitas Fit ou Sucos Detox)
+4. Faça upload dos PDFs — o sistema extrai as receitas automaticamente
+
+**PDFs suportados:** Estrutura com Título → Ingredientes → Modo de Preparo
+
+---
+
+## Rotas
+
+| Rota | Descrição |
+|------|-----------|
+| `/` | App principal (mobile) |
+| `/admin` | Painel de upload de PDFs |
+| `/api/recipes` | GET — receitas do banco |
+| `/api/plan` | POST — gera plano personalizado |
+| `/api/upload` | POST — upload e parse de PDF |
+
+---
+
+## Formulário do usuário
+
+- **Nome completo**
+- **Idade**
+- **Peso atual** (kg)
+- **Altura** (cm)
+- **Quantos kg quer perder** (slider 1–50 kg)
+- **O que mais incomoda** (barriga, coxas, braços, costas, quadril, rosto, pernas, corpo todo)
+- **Duração do plano** (5, 10 ou 20 dias)
