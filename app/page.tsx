@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import Image from 'next/image'
+import { supabase } from '@/lib/supabase'
 import { processAll } from '@/lib/calculator'
-import { generatePlan, buildWhatsAppText, MEAL_LABELS, GOAL_LABELS } from '@/lib/planner'
+import { generatePlan, buildWhatsAppText, MEAL_LABELS } from '@/lib/planner'
 import type { UserData, NutritionData } from '@/lib/calculator'
 import type { RecipesByCategory } from '@/lib/supabase'
 import type { MealPlanDay } from '@/lib/planner'
@@ -17,6 +18,13 @@ interface FormData {
   kgPerder: number
   incomoda: string[]
   dias: 5 | 10 | 20
+}
+
+interface UserProfile {
+  id: string
+  email: string
+  has_plan_10: boolean
+  has_plan_20: boolean
 }
 
 const INCOMODA_OPTIONS = [
@@ -39,14 +47,21 @@ const LOADING_MSGS = [
   '✨ Finalizando seu plano personalizado...',
 ]
 
-const DAY_NAMES = ['Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado','Domingo']
+type Screen = 'splash' | 'login' | 'form' | 'loading' | 'plan'
 
-type Screen = 'splash' | 'form' | 'loading' | 'plan'
-
-// ── Componente Principal ─────────────────────────────────────
 export default function Home() {
   const [screen, setScreen]           = useState<Screen>('splash')
-  const [form, setForm]               = useState<FormData>({ nomeCompleto: '', idade: '', peso: '', altura: '', kgPerder: 10, incomoda: [], dias: 10 })
+  const [session, setSession]         = useState<any>(null)
+  const [profile, setProfile]         = useState<UserProfile | null>(null)
+  
+  // Auth Form State
+  const [authTab, setAuthTab]         = useState<'signin' | 'signup'>('signin')
+  const [email, setEmail]             = useState('')
+  const [password, setPassword]       = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
+
+  // Plan Form State
+  const [form, setForm]               = useState<FormData>({ nomeCompleto: '', idade: '', peso: '', altura: '', kgPerder: 10, incomoda: [], dias: 5 })
   const [userData, setUserData]       = useState<UserData | null>(null)
   const [nutrition, setNutrition]     = useState<NutritionData | null>(null)
   const [plan, setPlan]               = useState<MealPlanDay[]>([])
@@ -59,11 +74,59 @@ export default function Home() {
   const [pdfLoading, setPdfLoading]   = useState(false)
   const sliderRef = useRef<HTMLInputElement>(null)
 
-  // ── Vai para formulário após splash ──────────────────────
+  // Paywall Modal State
+  const [showPaywall, setShowPaywall] = useState(false)
+  const [paywallDays, setPaywallDays] = useState<10 | 20>(10)
+  const [paying, setPaying]           = useState(false)
+  const [pixCopied, setPixCopied]     = useState(false)
+
+  // ── Carrega Sessão Inicial ────────────────────────────────
   useEffect(() => {
-    const t = setTimeout(() => setScreen('form'), 2600)
-    return () => clearTimeout(t)
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      if (session) fetchProfile(session.user.id)
+    })
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+      if (session) {
+        fetchProfile(session.user.id)
+      } else {
+        setProfile(null)
+      }
+    })
+
+    return () => subscription.unsubscribe()
   }, [])
+
+  // ── Redirecionamento Inicial ─────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (session) {
+        setScreen('form')
+      } else {
+        setScreen('login')
+      }
+    }, 2400)
+    return () => clearTimeout(t)
+  }, [session])
+
+  // ── Busca Perfil do Usuário ──────────────────────────────
+  async function fetchProfile(userId: string) {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+      
+      if (error) throw error
+      setProfile(data)
+    } catch (e) {
+      console.warn('Erro ao carregar perfil, tentando novamente em 2s...')
+      setTimeout(() => fetchProfile(userId), 2000)
+    }
+  }
 
   // ── Busca receitas do banco ───────────────────────────────
   useEffect(() => {
@@ -87,7 +150,36 @@ export default function Home() {
     setTimeout(() => setToast(null), 3000)
   }, [])
 
-  // ── Validação ─────────────────────────────────────────────
+  // ── Login / Cadastro ─────────────────────────────────────
+  async function handleAuth(e: React.FormEvent) {
+    e.preventDefault()
+    if (!email || !password || password.length < 6) {
+      showToast('Preencha os campos (mínimo 6 caracteres de senha).', 'err')
+      return
+    }
+
+    setAuthLoading(true)
+    try {
+      if (authTab === 'signin') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password })
+        if (error) throw error
+        showToast('Acesso autorizado! Bem-vindo(a).')
+        setScreen('form')
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password })
+        if (error) throw error
+        showToast('Conta criada com sucesso! Faça login agora.')
+        setAuthTab('signin')
+        setPassword('')
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Falha na autenticação', 'err')
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  // ── Validação do Formulário ──────────────────────────────
   const isValid = form.nomeCompleto.trim().length >= 2 &&
                   parseInt(form.idade) >= 10 &&
                   parseFloat(form.peso) > 0 &&
@@ -101,7 +193,80 @@ export default function Home() {
     }))
   }
 
-  // ── Submissão do formulário ───────────────────────────────
+  // ── Seleciona Duração (com validação de compra) ──────────
+  function selectDuration(days: 5 | 10 | 20) {
+    if (days === 5) {
+      setForm(f => ({ ...f, dias: 5 }))
+      return
+    }
+
+    // Plano de 10 dias necessita de compra
+    if (days === 10) {
+      if (profile?.has_plan_10 || profile?.has_plan_20) {
+        setForm(f => ({ ...f, dias: 10 }))
+      } else {
+        setPaywallDays(10)
+        setShowPaywall(true)
+      }
+    }
+
+    // Plano de 20 dias necessita de compra
+    if (days === 20) {
+      if (profile?.has_plan_20) {
+        setForm(f => ({ ...f, dias: 20 }))
+      } else {
+        setPaywallDays(20)
+        setShowPaywall(true)
+      }
+    }
+  }
+
+  // ── Simula Compra com Pix ────────────────────────────────
+  async function simulatePayment() {
+    if (!profile) return
+    setPaying(true)
+    
+    // Simula validação e aprovação do Pix em 3 segundos
+    setTimeout(async () => {
+      try {
+        const updateData = paywallDays === 10 
+          ? { has_plan_10: true } 
+          : { has_plan_20: true }
+
+        const { error } = await (supabase as any)
+          .from('profiles')
+          .update(updateData)
+          .eq('id', profile.id)
+
+        if (error) throw error
+
+        // Atualiza estado local do perfil
+        setProfile(prev => prev ? { ...prev, ...updateData } : null)
+        
+        // Atualiza formulário com a duração comprada
+        setForm(f => ({ ...f, dias: paywallDays }))
+        
+        showToast(`🎉 Plano de ${paywallDays} dias liberado permanentemente!`)
+        setShowPaywall(false)
+      } catch (err: any) {
+        showToast('Erro ao liberar plano. Tente novamente.', 'err')
+      } finally {
+        setPaying(false)
+        setPixCopied(false)
+      }
+    }, 3000)
+  }
+
+  // ── Copiar Chave Pix ─────────────────────────────────────
+  function copyPixKey() {
+    const randomPixCode = "00020126580014BR.GOV.BCB.PIX0136ziylzgdhushrsgxthhyd-supabase-checkout5204000053039865405" + (paywallDays === 10 ? "9.00" : "12.00") + "5802BR5915EMAGRECEBRASIL6009SAOPAULO62070503FIT"
+    navigator.clipboard.writeText(randomPixCode)
+    setPixCopied(true)
+    showToast('Chave Pix copiada para a área de transferência!')
+    setTimeout(() => setPixCopied(false), 2000)
+  }
+
+  // ── Submissão do Formulário ───────────────────────────────
   async function handleSubmit() {
     if (!isValid) return
 
@@ -110,16 +275,17 @@ export default function Home() {
       weight:        parseFloat(form.peso),
       height:        parseFloat(form.altura),
       age:           parseInt(form.idade),
-      sex:           'female',       // simplificado por enquanto
+      sex:           'female',
       goal:          'lose',
       activityLevel: 'light',
       days:          form.dias,
+      kgPerder:      form.kgPerder,
+      incomoda:      form.incomoda,
     }
 
     setUserData(ud)
     setScreen('loading')
 
-    // Animação de loading
     let i = 0
     const interval = setInterval(() => {
       if (i < LOADING_MSGS.length) {
@@ -133,7 +299,6 @@ export default function Home() {
             const nd = processAll(ud)
             setNutrition(nd)
 
-            // Usa receitas do banco ou as padrão
             const dbCount = recipes ? Object.values(recipes).reduce((a, b) => a + b.length, 0) : 0
             const recipeData = dbCount > 0 ? recipes! : getDefaultRecipes()
             const p = generatePlan(ud, nd, recipeData, form.dias)
@@ -165,7 +330,6 @@ export default function Home() {
     if (!plan.length || !userData || !nutrition) return
     setPdfLoading(true)
     try {
-      // Importa jsPDF dinamicamente (só no browser)
       const { jsPDF } = (await import('jspdf')).default ? await import('jspdf') : { jsPDF: (window as any).jspdf?.jsPDF }
       generatePDF(new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' }))
       showToast('✅ PDF baixado com sucesso!')
@@ -178,7 +342,6 @@ export default function Home() {
 
   function cleanTextForPDF(str: string): string {
     if (!str) return ''
-    // Remove emojis e caracteres não-latin1
     return str.replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDC00-\uDFFF])/g, '').trim()
   }
 
@@ -276,14 +439,14 @@ export default function Home() {
     doc.save(`emagrece-brasil-${name}.pdf`)
   }
 
-  // ── WhatsApp ──────────────────────────────────────────────
-  function handleWhatsApp() {
-    if (!plan.length || !userData || !nutrition) return
-    const text = buildWhatsAppText(plan, userData, nutrition)
-    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank')
+  // ── Logout ───────────────────────────────────────────────
+  async function handleLogout() {
+    if (confirm('Deseja realmente sair da sua conta?')) {
+      await supabase.auth.signOut()
+      setScreen('login')
+    }
   }
 
-  // ── RENDER ────────────────────────────────────────────────
   const day = plan[currentDay]
 
   return (
@@ -304,6 +467,89 @@ export default function Home() {
         </div>
       </section>
 
+      {/* ══ LOGIN / CADASTRO ══ */}
+      <section id="screen-login" className={`screen ${screen === 'login' ? 'active' : ''}`} style={{ justifyContent: 'center', padding: 24 }}>
+        <div style={{ background: '#fff', borderRadius: 16, padding: '24px 20px', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div style={{ textAlign: 'center', marginBottom: 20 }}>
+            <Image src="/logo.png" alt="Logo" width={56} height={56} style={{ objectFit: 'contain', margin: '0 auto' }} />
+            <h2 style={{ fontSize: 20, fontWeight: 900, color: 'var(--green-dark)', marginTop: 8 }}>Emagrece Brasil</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Crie sua conta ou faça login para começar</p>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, background: 'var(--bg)', padding: 4, borderRadius: 10, marginBottom: 18 }}>
+            <button 
+              type="button"
+              onClick={() => setAuthTab('signin')}
+              style={{
+                padding: '8px', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: authTab === 'signin' ? '#fff' : 'transparent',
+                color: authTab === 'signin' ? 'var(--green-dark)' : 'var(--text-muted)',
+                cursor: 'pointer'
+              }}
+            >
+              Entrar
+            </button>
+            <button 
+              type="button"
+              onClick={() => setAuthTab('signup')}
+              style={{
+                padding: '8px', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: authTab === 'signup' ? '#fff' : 'transparent',
+                color: authTab === 'signup' ? 'var(--green-dark)' : 'var(--text-muted)',
+                cursor: 'pointer'
+              }}
+            >
+              Criar Conta
+            </button>
+          </div>
+
+          <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div className="field">
+              <label className="field-label" htmlFor="email">E-mail</label>
+              <div className="input-wrap">
+                <input 
+                  id="email"
+                  type="email" 
+                  placeholder="seuemail@provedor.com" 
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  autoComplete="email"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="field-label" htmlFor="password">Senha</label>
+              <div className="input-wrap">
+                <input 
+                  id="password"
+                  type="password" 
+                  placeholder="Minimo 6 caracteres" 
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              style={{
+                width: '100%', padding: '14px', background: 'linear-gradient(135deg, var(--green), var(--green-dark))',
+                border: 'none', borderRadius: 10, color: 'white', fontWeight: 800, fontSize: 15,
+                cursor: authLoading ? 'not-allowed' : 'pointer', fontFamily: 'Inter, sans-serif',
+                boxShadow: 'var(--shadow-green)', marginTop: 8
+              }}
+            >
+              {authLoading ? 'Processando...' : authTab === 'signin' ? 'ENTRAR' : 'CRIAR MINHA CONTA'}
+            </button>
+          </form>
+        </div>
+      </section>
+
       {/* ══ FORMULÁRIO ══ */}
       <section id="screen-form" className={`screen ${screen === 'form' ? 'active' : ''}`}>
 
@@ -311,6 +557,15 @@ export default function Home() {
           <div className="brand-row">
             <Image src="/logo.png" alt="Logo" width={36} height={36} className="brand-logo" />
             <span className="brand-name">Emagrece Brasil</span>
+            <button 
+              onClick={handleLogout}
+              style={{
+                marginLeft: 'auto', background: 'none', border: 'none', 
+                color: 'var(--error)', fontSize: 12, fontWeight: 600, cursor: 'pointer'
+              }}
+            >
+              Sair🚪
+            </button>
           </div>
         </div>
 
@@ -323,7 +578,7 @@ export default function Home() {
 
           {/* Card: Dados Pessoais */}
           <div className="form-card">
-            <div className="card-title">👤 Seus Dados</div>
+            <div className="card-title">Seus Dados</div>
 
             <div className="field">
               <label className="field-label" htmlFor="nomeCompleto">Nome completo</label>
@@ -396,7 +651,7 @@ export default function Home() {
 
           {/* Card: Quantos kg quer perder */}
           <div className="form-card">
-            <div className="card-title">🎯 Quantos quilos quer perder?</div>
+            <div className="card-title">Quantos quilos quer perder?</div>
             <div className="slider-wrap">
               <input
                 ref={sliderRef}
@@ -418,7 +673,7 @@ export default function Home() {
 
           {/* Card: O que incomoda */}
           <div className="form-card">
-            <div className="card-title">😣 O que mais te incomoda?</div>
+            <div className="card-title">O que mais te incomoda?</div>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
               Pode marcar mais de um 👇
             </p>
@@ -442,21 +697,45 @@ export default function Home() {
 
           {/* Card: Duração */}
           <div className="form-card">
-            <div className="card-title">📅 Duração do Plano</div>
+            <div className="card-title">Duração do Plano</div>
             <div className="duration-grid">
-              {([5, 10, 20] as const).map(d => (
-                <button
-                  key={d}
-                  className={`dur-btn ${form.dias === d ? 'selected' : ''}`}
-                  onClick={() => setForm(f => ({ ...f, dias: d }))}
-                  type="button"
-                >
-                  <span className="dur-num">{d}</span>
-                  <span className="dur-text">dias</span>
-                  {d === 10 && <span className="dur-badge">⭐ Popular</span>}
-                  {d === 20 && <span className="dur-badge">🏆 Completo</span>}
-                </button>
-              ))}
+              <button
+                className={`dur-btn ${form.dias === 5 ? 'selected' : ''}`}
+                onClick={() => selectDuration(5)}
+                type="button"
+              >
+                <span className="dur-num">5</span>
+                <span className="dur-text">dias</span>
+                <span className="dur-badge" style={{ background: '#e2e8f0', color: '#475569' }}>Grátis</span>
+              </button>
+
+              <button
+                className={`dur-btn ${form.dias === 10 ? 'selected' : ''}`}
+                onClick={() => selectDuration(10)}
+                type="button"
+              >
+                <span className="dur-num">10</span>
+                <span className="dur-text">dias</span>
+                {profile?.has_plan_10 || profile?.has_plan_20 ? (
+                  <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
+                ) : (
+                  <span className="dur-badge">R$ 9,00</span>
+                )}
+              </button>
+
+              <button
+                className={`dur-btn ${form.dias === 20 ? 'selected' : ''}`}
+                onClick={() => selectDuration(20)}
+                type="button"
+              >
+                <span className="dur-num">20</span>
+                <span className="dur-text">dias</span>
+                {profile?.has_plan_20 ? (
+                  <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
+                ) : (
+                  <span className="dur-badge">R$ 12,00</span>
+                )}
+              </button>
             </div>
           </div>
 
@@ -469,7 +748,7 @@ export default function Home() {
             disabled={!isValid}
             type="button"
           >
-            ⚡ GERAR MEU PLANO GRATUITO
+            ⚡ GERAR MEU PLANO PERSONALIZADO
           </button>
         </div>
       </section>
@@ -703,15 +982,98 @@ export default function Home() {
         </div>
       </section>
 
+      {/* ══ OVERLAY: MODAL PIX DE COBRANÇA ══ */}
+      {showPaywall && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(15,23,42,.75)', 
+          backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'flex-end', 
+          justifyContent: 'center', zIndex: 999
+        }}>
+          <div style={{
+            background: '#fff', width: '100%', maxWidth: 430,
+            borderTopLeftRadius: 24, borderTopRightRadius: 24,
+            padding: '24px 20px 36px', boxShadow: '0 -10px 40px rgba(0,0,0,.2)',
+            animation: 'slideUp .3s cubic-bezier(.34,1.56,.64,1) both'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <span style={{ fontSize: 16, fontWeight: 900, color: 'var(--green-dark)' }}>🔐 Desbloquear Plano Completo</span>
+              <button 
+                onClick={() => setShowPaywall(false)}
+                style={{ background: '#f1f5f9', border: 'none', width: 28, height: 28, borderRadius: '50%', fontSize: 14, cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ textAlign: 'center', marginBottom: 20 }}>
+              <p style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>
+                O plano de 5 dias é grátis. Para acessar o plano completo de <strong>{paywallDays} dias</strong> e recebê-lo permanentemente em sua conta:
+              </p>
+              <div style={{ background: 'var(--green-light)', display: 'inline-block', padding: '12px 24px', borderRadius: 16 }}>
+                <span style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Pagamento Único via PIX</span>
+                <div style={{ fontSize: 32, fontWeight: 900, color: 'var(--green-dark)', marginTop: 2 }}>
+                  R$ {paywallDays === 10 ? '9,00' : '12,00'}
+                </div>
+              </div>
+            </div>
+
+            {/* Código QR Pix Simulado */}
+            <div style={{ background: 'var(--bg)', borderRadius: 16, padding: 16, textAlign: 'center', marginBottom: 20, border: '1px solid var(--border)' }}>
+              <div style={{ width: 140, height: 140, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 44 }}>
+                📱
+              </div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
+                Escaneie o QR Code acima ou copie a chave Pix Copia e Cola para pagar em seu banco.
+              </p>
+              
+              <button
+                onClick={copyPixKey}
+                style={{
+                  padding: '10px 16px', background: pixCopied ? 'var(--green-light)' : '#fff',
+                  border: `1.5px solid ${pixCopied ? 'var(--green)' : 'var(--border)'}`,
+                  borderRadius: 10, color: pixCopied ? 'var(--green-dark)' : 'var(--text-2)',
+                  fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%'
+                }}
+              >
+                {pixCopied ? '✓ Copiado!' : '📋 Copiar Código Pix Copia e Cola'}
+              </button>
+            </div>
+
+            <button
+              onClick={simulatePayment}
+              disabled={paying}
+              style={{
+                width: '100%', padding: '15px', background: paying ? '#86efac' : 'linear-gradient(135deg, var(--green), var(--green-dark))',
+                border: 'none', borderRadius: 12, color: 'white', fontWeight: 800, fontSize: 15,
+                cursor: paying ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+              }}
+            >
+              {paying ? (
+                <>
+                  <span className="spinner" />
+                  Verificando Pix...
+                </>
+              ) : '💸 JÁ PAGUEI (Confirmar Pagamento)'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {toast && (
         <div className={`toast show ${toast.type}`}>{toast.msg}</div>
       )}
+
+      <style>{`
+        @keyframes slideUp {
+          from { transform: translateY(100%); }
+          to { transform: translateY(0); }
+        }
+      `}</style>
     </div>
   )
 }
 
-// Fallback de receitas padrão (quando banco não está configurado)
 function getDefaultRecipes(): RecipesByCategory {
   return {
     breakfast: [
