@@ -14,6 +14,12 @@ interface CustomUser {
   created_at: string
 }
 
+// CRM: Interface estendida do usuário para incluir campos de pagamento
+interface CustomUserExtended extends CustomUser {
+  payment_status?: string
+  requested_plan?: number
+}
+
 interface UploadResult {
   success?: boolean
   warning?: string
@@ -35,7 +41,7 @@ export default function AdminPage() {
   const [activeTab, setActiveTab]     = useState<AdminTab>('users')
 
   // Users CRM State
-  const [users, setUsers]             = useState<CustomUser[]>([])
+  const [users, setUsers]             = useState<CustomUserExtended[]>([])
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newName, setNewName]         = useState('')
@@ -93,8 +99,8 @@ export default function AdminPage() {
     } catch {}
   }
 
-  // ── CRM: Carrega lista de usuários ─────────────────────────
-  async function loadUsers() {
+  // ── CRM: Carrega lista de usuários e emite sinal sonoro ─────────
+  async function loadUsers(playNotification = false) {
     try {
       const { data, error } = await supabase
         .from('users')
@@ -102,11 +108,44 @@ export default function AdminPage() {
         .order('created_at', { ascending: false })
 
       if (error) throw error
-      setUsers(data || [])
+      const fetchedUsers = (data || []) as CustomUserExtended[]
+      
+      // Se playNotification estiver ativo, verifica se a quantidade de pendentes aumentou
+      if (playNotification) {
+        setUsers((currentUsers: CustomUserExtended[]) => {
+          const currentPendings = currentUsers.filter(u => u.payment_status === 'pending').map(u => u.id)
+          const newPendings = fetchedUsers.filter(u => u.payment_status === 'pending')
+          
+          // Se tiver alguém novo pendente que não estava antes
+          const hasNewRequest = newPendings.some(u => !currentPendings.includes(u.id))
+          if (hasNewRequest) {
+            try {
+              // Toca som de sino limpo (Chime) público
+              const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-200.wav')
+              audio.volume = 0.8
+              audio.play().catch(() => console.log('Bloqueado pelo navegador até interação'))
+            } catch (e) {
+              console.warn('Erro ao reproduzir áudio:', e)
+            }
+          }
+          return fetchedUsers
+        })
+      } else {
+        setUsers(fetchedUsers)
+      }
     } catch (e) {
       console.error('Erro ao carregar usuários:', e)
     }
   }
+
+  // Polling automático no admin a cada 8 segundos após autenticado
+  useEffect(() => {
+    if (!authed) return
+    const interval = setInterval(() => {
+      loadUsers(true)
+    }, 8000)
+    return () => clearInterval(interval)
+  }, [authed])
 
   // ── CRM: Cadastra Novo Usuário ────────────────────────────
   async function handleCreateUser(e: React.FormEvent) {
@@ -126,7 +165,8 @@ export default function AdminPage() {
           password: newPassword,
           name: newName.trim() || null,
           has_plan_10: newPlan === '10' || newPlan === '20',
-          has_plan_20: newPlan === '20'
+          has_plan_20: newPlan === '20',
+          payment_status: 'idle'
         })
 
       if (error) throw error
@@ -141,6 +181,44 @@ export default function AdminPage() {
       alert(`Erro: ${err.message || 'Nome de usuário já existe.'}`)
     } finally {
       setUserLoading(false)
+    }
+  }
+
+  // ── CRM: Aprova pagamento do cliente ──────────────────────
+  async function approveUserPayment(userId: string, requestedPlan: number) {
+    try {
+      const updateData = {
+        payment_status: 'approved',
+        has_plan_10: requestedPlan === 10 || requestedPlan === 20,
+        has_plan_20: requestedPlan === 20
+      }
+
+      const { error } = await (supabase as any)
+        .from('users')
+        .update(updateData)
+        .eq('id', userId)
+
+      if (error) throw error
+      alert('Pagamento aprovado e plano liberado com sucesso!')
+      loadUsers()
+    } catch (err: any) {
+      alert('Erro ao aprovar liberação.')
+    }
+  }
+
+  // ── CRM: Recusa/Rejeita solicitação ───────────────────────
+  async function rejectUserPayment(userId: string) {
+    try {
+      const { error } = await (supabase as any)
+        .from('users')
+        .update({ payment_status: 'rejected' })
+        .eq('id', userId)
+
+      if (error) throw error
+      alert('Solicitação recusada com sucesso.')
+      loadUsers()
+    } catch (err: any) {
+      alert('Erro ao recusar liberação.')
     }
   }
 
@@ -391,6 +469,47 @@ export default function AdminPage() {
               </form>
             </div>
 
+            {/* Notificações de Cobrança Pendentes */}
+            {users.filter(u => u.payment_status === 'pending').length > 0 && (
+              <div style={{ background: '#fffbeb', borderRadius: 14, padding: 20, border: '1.5px solid #f59e0b', boxShadow: '0 4px 12px rgba(245,158,11,.15)' }}>
+                <h3 style={{ fontSize: 15, fontWeight: 800, color: '#b45309', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  🔔 Pedidos de Liberação Pendentes
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {users.filter(u => u.payment_status === 'pending').map(u => (
+                    <div key={u.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: '#fff', border: '1px solid #fde68a', borderRadius: 10 }}>
+                      <div>
+                        <strong style={{ color: '#0f172a', fontSize: 13 }}>{u.name || `@${u.username}`}</strong>
+                        <span style={{ fontSize: 12, color: '#64748b', marginLeft: 6 }}>
+                          solicitou liberação do plano de <strong>{u.requested_plan} dias</strong>
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          onClick={() => approveUserPayment(u.id, u.requested_plan || 10)}
+                          style={{
+                            padding: '8px 12px', background: '#22c55e', color: '#fff', border: 'none',
+                            borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer'
+                          }}
+                        >
+                          ✓ Aprovar Pagamento
+                        </button>
+                        <button
+                          onClick={() => rejectUserPayment(u.id)}
+                          style={{
+                            padding: '8px 12px', background: '#ef4444', color: '#fff', border: 'none',
+                            borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer'
+                          }}
+                        >
+                          ✕ Recusar
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Listagem de Usuários */}
             <div style={{ background: '#fff', borderRadius: 14, padding: 20, border: '1px solid #e2e8f0', boxShadow: '0 1px 4px rgba(0,0,0,.06)' }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', marginBottom: 16 }}>📋 Lista de Clientes</h3>
@@ -401,8 +520,9 @@ export default function AdminPage() {
                   {users.map(u => (
                     <div key={u.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10 }}>
                       <div>
-                        <div style={{ fontWeight: 700, fontSize: 14, color: '#0f172a' }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, color: '#0f172a', display: 'flex', alignItems: 'center', gap: 6 }}>
                           {u.name || 'Sem Nome Cadastrado'}
+                          {u.payment_status === 'pending' && <span style={{ fontSize: 9, background: '#fef3c7', color: '#d97706', padding: '2px 6px', borderRadius: 10, fontWeight: 700 }}>PENDENTE</span>}
                         </div>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
                           usuário: <strong style={{ color: '#16a34a' }}>@{u.username}</strong> | senha: <code>{u.password}</code>

@@ -22,9 +22,12 @@ interface FormData {
 interface CustomUser {
   id: string
   username: string
+  password?: string
   name?: string
   has_plan_10: boolean
   has_plan_20: boolean
+  payment_status?: string // 'idle' | 'pending' | 'approved' | 'rejected'
+  requested_plan?: number // 10 | 20
 }
 
 const INCOMODA_OPTIONS = [
@@ -77,6 +80,7 @@ export default function Home() {
   const [paywallDays, setPaywallDays] = useState<10 | 20>(10)
   const [paying, setPaying]           = useState(false)
   const [pixCopied, setPixCopied]     = useState(false)
+  const [countdown, setCountdown]     = useState(180) // 3 minutos em segundos
 
   // ── Carrega Sessão Local do Navegador ──────────────────────
   useEffect(() => {
@@ -85,7 +89,6 @@ export default function Home() {
       try {
         const parsed = JSON.parse(savedUser)
         setUser(parsed)
-        // Recarrega dados atualizados do banco para garantir que pegamos compras recentes
         refreshUserData(parsed.id)
       } catch {
         localStorage.removeItem('emagrece_brasil_user')
@@ -105,6 +108,32 @@ export default function Home() {
     return () => clearTimeout(t)
   }, [])
 
+  // ── Consulta automática para liberação em tempo real ──────
+  useEffect(() => {
+    if (!user || user.payment_status !== 'pending') return
+
+    // Consulta o banco a cada 5 segundos se estiver aguardando aprovação
+    const interval = setInterval(() => {
+      refreshUserData(user.id)
+    }, 5000)
+
+    return () => clearInterval(interval)
+  }, [user])
+
+  // ── Cronômetro Regressivo do Pagamento ───────────────────
+  useEffect(() => {
+    if (!showPaywall || user?.payment_status !== 'pending') {
+      setCountdown(180)
+      return
+    }
+
+    const timer = setInterval(() => {
+      setCountdown(c => (c > 0 ? c - 1 : 0))
+    }, 1000)
+
+    return () => clearInterval(timer)
+  }, [showPaywall, user])
+
   // ── Recarrega dados do usuário ───────────────────────────
   async function refreshUserData(userId: string) {
     try {
@@ -116,8 +145,17 @@ export default function Home() {
 
       if (error) throw error
       if (data) {
-        setUser(data)
-        localStorage.setItem('emagrece_brasil_user', JSON.stringify(data))
+        const uData = data as unknown as CustomUser
+        setUser(uData)
+        localStorage.setItem('emagrece_brasil_user', JSON.stringify(uData))
+        
+        // Se foi aprovado enquanto o modal estava aberto, fecha o modal e seleciona a duração
+        const planReleased = (uData.requested_plan === 10 && uData.has_plan_10) || (uData.requested_plan === 20 && uData.has_plan_20)
+        if (uData.payment_status === 'approved' || planReleased) {
+          setShowPaywall(false)
+          setForm(f => ({ ...f, dias: (uData.requested_plan || 10) as 10 | 20 }))
+          showToast('🎉 Seu plano pago foi ativado com sucesso!')
+        }
       }
     } catch (e) {
       console.warn('Erro ao atualizar usuário do banco:', e)
@@ -167,13 +205,13 @@ export default function Home() {
       if (error) throw error
 
       if (!data) {
-        showToast('Usuário ou senha inválidos. Solicite seu acesso.', 'err')
+        showToast('Usuário ou senha inválidos.', 'err')
         return
       }
 
       setUser(data)
       localStorage.setItem('emagrece_brasil_user', JSON.stringify(data))
-      showToast('Acesso autorizado! Bem-vindo(a).')
+      showToast('Acesso autorizado!')
       setScreen('form')
     } catch (err: any) {
       showToast(err.message || 'Erro ao realizar login', 'err')
@@ -203,7 +241,6 @@ export default function Home() {
       return
     }
 
-    // Plano de 10 dias
     if (days === 10) {
       if (user?.has_plan_10 || user?.has_plan_20) {
         setForm(f => ({ ...f, dias: 10 }))
@@ -213,7 +250,6 @@ export default function Home() {
       }
     }
 
-    // Plano de 20 dias
     if (days === 20) {
       if (user?.has_plan_20) {
         setForm(f => ({ ...f, dias: 20 }))
@@ -224,68 +260,63 @@ export default function Home() {
     }
   }
 
-  // ── Simula Compra com Pix ────────────────────────────────
-  async function simulatePayment() {
+  // ── Solicita liberação de pagamento ────────────────────────
+  async function requestPlanActivation() {
     if (!user) return
     setPaying(true)
-    
-    setTimeout(async () => {
-      try {
-        const updateData = paywallDays === 10 
-          ? { has_plan_10: true } 
-          : { has_plan_20: true }
 
-        const { error } = await (supabase as any)
-          .from('users')
-          .update(updateData)
-          .eq('id', user.id)
-
-        if (error) throw error
-
-        const updatedUser = { ...user, ...updateData }
-        setUser(updatedUser)
-        localStorage.setItem('emagrece_brasil_user', JSON.stringify(updatedUser))
-        
-        setForm(f => ({ ...f, dias: paywallDays }))
-        showToast(`🎉 Plano de ${paywallDays} dias liberado!`)
-        setShowPaywall(false)
-      } catch (err: any) {
-        showToast('Erro ao liberar plano. Tente novamente.', 'err')
-      } finally {
-        setPaying(false)
-        setPixCopied(false)
+    try {
+      const updateData = {
+        payment_status: 'pending',
+        requested_plan: paywallDays
       }
-    }, 3000)
+
+      const { error } = await (supabase as any)
+        .from('users')
+        .update(updateData)
+        .eq('id', user.id)
+
+      if (error) throw error
+
+      const updatedUser = { ...user, ...updateData }
+      setUser(updatedUser)
+      localStorage.setItem('emagrece_brasil_user', JSON.stringify(updatedUser))
+      setCountdown(180) // Inicia contagem regressiva
+      
+      showToast('Solicitação de liberação enviada com sucesso!')
+    } catch (err: any) {
+      showToast('Erro ao enviar solicitação.', 'err')
+    } finally {
+      setPaying(false)
+    }
   }
 
   // ── Gerador de Código Pix Estático (BR Code) ──────────────
   function generatePixPayload(key: string, name: string, city: string, amount: number, reference: string = 'FITPLANNER'): string {
     const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase()
     
-    // Constrói tags EMV
     const buildTag = (id: string, value: string) => {
       const len = value.length.toString().padStart(2, '0')
       return id + len + value
     }
 
     const payloadParts = [
-      '000201', // Payload Format Indicator
+      '000201',
       buildTag('26', 
         buildTag('00', 'br.gov.bcb.pix') + 
         buildTag('01', key.trim())
       ),
-      buildTag('52', '0000'), // Merchant Category Code
-      buildTag('53', '986'),  // Currency (BRL)
-      buildTag('54', amount.toFixed(2)), // Amount (9.00 ou 12.00)
-      buildTag('58', 'BR'),  // Country Code
-      buildTag('59', norm(name).substring(0, 25)), // Beneficiário
-      buildTag('60', norm(city).substring(0, 15)), // Cidade
-      buildTag('62', buildTag('05', norm(reference).substring(0, 25))) // Referência
+      buildTag('52', '0000'),
+      buildTag('53', '986'),
+      buildTag('54', amount.toFixed(2)),
+      buildTag('58', 'BR'),
+      buildTag('59', norm(name).substring(0, 25)),
+      buildTag('60', norm(city).substring(0, 15)),
+      buildTag('62', buildTag('05', norm(reference).substring(0, 25)))
     ]
 
     const incompletePayload = payloadParts.join('') + '6304'
 
-    // Cálculo do CRC16 CCITT
     let crc = 0xFFFF
     for (let i = 0; i < incompletePayload.length; i++) {
       const charCode = incompletePayload.charCodeAt(i)
@@ -304,19 +335,20 @@ export default function Home() {
 
   // ── Copiar Chave Pix Dinâmica ────────────────────────────
   function copyPixKey() {
-    const pixKey  = process.env.NEXT_PUBLIC_PIX_KEY || '12345678000199'
-    const pixName = process.env.NEXT_PUBLIC_PIX_NAME || 'EMAGRECE BRASIL'
-    const pixCity = process.env.NEXT_PUBLIC_PIX_CITY || 'SAO PAULO'
-    const value   = paywallDays === 10 ? 9.00 : 12.00
+    // Chave CNPJ configurada
+    const pixKey  = '66162015000164'
+    const pixName = 'EMAGRECE BRASIL'
+    const pixCity = 'SAO PAULO'
+    const value   = paywallDays === 10 ? 7.00 : 9.00
 
     try {
       const pixCode = generatePixPayload(pixKey, pixName, pixCity, value)
       navigator.clipboard.writeText(pixCode)
       setPixCopied(true)
-      showToast('Pix Copia e Cola copiado com sucesso! Abra seu banco.')
+      showToast('Pix Copia e Cola copiado com sucesso!')
       setTimeout(() => setPixCopied(false), 2000)
     } catch {
-      showToast('Erro ao gerar código Pix. Copie o CNPJ direto.', 'err')
+      showToast('Erro ao gerar código Pix. Copie a chave direta.', 'err')
     }
   }
 
@@ -497,6 +529,13 @@ export default function Home() {
     }
   }
 
+  // Formatação do Countdown mm:ss
+  const formatCountdown = (secs: number) => {
+    const m = Math.floor(secs / 60)
+    const s = secs % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
+
   const day = plan[currentDay]
 
   return (
@@ -594,7 +633,10 @@ export default function Home() {
 
         <div className="form-hero">
           <h2 className="form-hero-title">Vamos criar seu plano! 💪</h2>
-          <p style={{ fontSize: 12, color: 'var(--green-dark)', fontWeight: 'bold' }}>👤 Logado como: @{user?.username}</p>
+          <p style={{ fontSize: 12, color: 'var(--green-dark)', fontWeight: 'bold' }}>
+            👤 Logado como: @{user?.username} 
+            {user?.payment_status === 'pending' && <span style={{ color: '#d97706', marginLeft: 8 }}>⏳ Pagamento em análise</span>}
+          </p>
         </div>
 
         <div className="form-body">
@@ -742,7 +784,7 @@ export default function Home() {
                 {user?.has_plan_10 || user?.has_plan_20 ? (
                   <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
                 ) : (
-                  <span className="dur-badge">R$ 9,00/mês</span>
+                  <span className="dur-badge">R$ 7,00</span>
                 )}
               </button>
 
@@ -756,7 +798,7 @@ export default function Home() {
                 {user?.has_plan_20 ? (
                   <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
                 ) : (
-                  <span className="dur-badge">R$ 9,00/mês</span>
+                  <span className="dur-badge">R$ 9,00</span>
                 )}
               </button>
             </div>
@@ -1019,7 +1061,7 @@ export default function Home() {
             animation: 'slideUp .3s cubic-bezier(.34,1.56,.64,1) both'
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <span style={{ fontSize: 16, fontWeight: 900, color: 'var(--green-dark)' }}>🔐 Desbloquear Plano Completo</span>
+              <span style={{ fontSize: 16, fontWeight: 900, color: 'var(--green-dark)' }}>🔐 Desbloquear Plano {paywallDays} Dias</span>
               <button 
                 onClick={() => setShowPaywall(false)}
                 style={{ background: '#f1f5f9', border: 'none', width: 28, height: 28, borderRadius: '50%', fontSize: 14, cursor: 'pointer' }}
@@ -1030,58 +1072,91 @@ export default function Home() {
 
             <div style={{ textAlign: 'center', marginBottom: 20 }}>
               <p style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>
-                O plano de 5 dias é grátis. Para acessar o plano de <strong>{paywallDays} dias</strong> você precisa assinar o nosso plano mensal:
+                O plano de 5 dias é grátis. Para ter acesso completo de <strong>{paywallDays} dias</strong>, realize o pagamento único abaixo:
               </p>
               <div style={{ background: 'var(--green-light)', display: 'inline-block', padding: '12px 24px', borderRadius: 16 }}>
-                <span style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Assinatura Mensal</span>
-                <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--green-dark)', marginTop: 2 }}>
-                  R$ {paywallDays === 10 ? '9,00' : '12,00'} / mês
+                <span style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Pagamento Único via Pix</span>
+                <div style={{ fontSize: 28, fontWeight: 900, color: 'var(--green-dark)', marginTop: 2 }}>
+                  R$ {paywallDays === 10 ? '7,00' : '9,00'}
                 </div>
               </div>
             </div>
 
-            {/* Link de Pagamento do InfinitePay */}
+            {/* Código QR Pix e Copia e Cola */}
             <div style={{ background: 'var(--bg)', borderRadius: 16, padding: 16, textAlign: 'center', marginBottom: 20, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>💳</div>
-              <p style={{ fontSize: 13, fontWeight: 'bold', color: 'var(--text-2)', marginBottom: 10 }}>
-                Toque no botão abaixo para abrir a página de pagamento seguro no InfinitePay.
-              </p>
-              
-              <a
-                href="https://invoice.infinitepay.io/plans/comfortclean-pvai/CTO0eeKjET"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'block', padding: '14px 16px', background: '#fff',
-                  border: '2px solid #5b21b6', textDecoration: 'none',
-                  borderRadius: 10, color: '#5b21b6',
-                  fontSize: 14, fontWeight: 800, textAlign: 'center'
-                }}
-              >
-                💳 IR PARA O INFINITEPAY
-              </a>
+              {user?.payment_status === 'pending' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ fontSize: 44, animation: 'pulse 1.5s infinite' }}>⏳</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#b45309' }}>
+                    Aguardando Confirmação
+                  </div>
+                  <p style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
+                    Sua solicitação de ativação do plano de <strong>{user?.requested_plan} dias</strong> foi enviada!
+                  </p>
+                  
+                  {/* Cronômetro Regressivo */}
+                  <div style={{ 
+                    fontSize: 22, fontWeight: 900, color: '#0f172a', background: '#fff', 
+                    border: '1.5px solid var(--border)', borderRadius: 10, padding: '8px 16px', display: 'inline-block', margin: '6px auto'
+                  }}>
+                    {formatCountdown(countdown)}
+                  </div>
+                  
+                  <p style={{ fontSize: 11, color: '#94a3b8' }}>
+                    O administrador foi notificado. A tela atualizará sozinha assim que aprovado.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div style={{ width: 140, height: 140, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 44 }}>
+                    📱
+                  </div>
+                  <p style={{ fontSize: 12, color: 'var(--text-2)', fontWeight: 600, marginBottom: 4 }}>
+                    Chave CNPJ: <span style={{ color: 'var(--green-dark)' }}>66.162.015/0001-64</span>
+                  </p>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+                    Escaneie o QR Code ou copie o código Pix abaixo para pagar em seu banco.
+                  </p>
+                  
+                  <button
+                    onClick={copyPixKey}
+                    style={{
+                      padding: '10px 16px', background: pixCopied ? 'var(--green-light)' : '#fff',
+                      border: `1.5px solid ${pixCopied ? 'var(--green)' : 'var(--border)'}`,
+                      borderRadius: 10, color: pixCopied ? 'var(--green-dark)' : 'var(--text-2)',
+                      fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%'
+                    }}
+                  >
+                    {pixCopied ? '✓ Copiado!' : '📋 Copiar Código Pix Copia e Cola'}
+                  </button>
+                </>
+              )}
             </div>
 
-            <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', marginBottom: 12 }}>
-              Depois de confirmar o pagamento no InfinitePay, toque no botão abaixo para liberar seu acesso.
-            </p>
+            {user?.payment_status !== 'pending' && (
+              <>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', marginBottom: 12 }}>
+                  Fez o Pix? Clique no botão abaixo para avisar o administrador e iniciar a ativação.
+                </p>
 
-            <button
-              onClick={simulatePayment}
-              disabled={paying}
-              style={{
-                width: '100%', padding: '15px', background: paying ? '#86efac' : 'linear-gradient(135deg, var(--green), var(--green-dark))',
-                border: 'none', borderRadius: 12, color: 'white', fontWeight: 800, fontSize: 15,
-                cursor: paying ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
-              }}
-            >
-              {paying ? (
-                <>
-                  <span className="spinner" />
-                  Liberando acesso...
-                </>
-              ) : '✅ JÁ ASSINEI, LIBERAR MEU PLANO'}
-            </button>
+                <button
+                  onClick={requestPlanActivation}
+                  disabled={paying}
+                  style={{
+                    width: '100%', padding: '15px', background: paying ? '#86efac' : 'linear-gradient(135deg, var(--green), var(--green-dark))',
+                    border: 'none', borderRadius: 12, color: 'white', fontWeight: 800, fontSize: 15,
+                    cursor: paying ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+                  }}
+                >
+                  {paying ? (
+                    <>
+                      <span className="spinner" />
+                      Enviando pedido...
+                    </>
+                  ) : '✅ JÁ FIZ O PAGAMENTO'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1095,6 +1170,11 @@ export default function Home() {
         @keyframes slideUp {
           from { transform: translateY(100%); }
           to { transform: translateY(0); }
+        }
+        @keyframes pulse {
+          0% { transform: scale(1); }
+          50% { transform: scale(1.05); }
+          100% { transform: scale(1); }
         }
       `}</style>
     </div>
