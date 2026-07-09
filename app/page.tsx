@@ -176,6 +176,12 @@ export default function Home() {
     }
   }
 
+  function cleanTextForPDF(str: string): string {
+    if (!str) return ''
+    // Remove emojis e caracteres não-latin1
+    return str.replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDC00-\uDFFF])/g, '').trim()
+  }
+
   function generatePDF(doc: any) {
     if (!userData || !nutrition) return
     const pageW = doc.internal.pageSize.getWidth()
@@ -194,24 +200,24 @@ export default function Home() {
     doc.text('Plano Alimentar Personalizado', pageW / 2, 36, { align: 'center' })
     doc.setFontSize(16)
     doc.setTextColor(22, 163, 74)
-    doc.text(userData.name, pageW / 2, 76, { align: 'center' })
+    doc.text(cleanTextForPDF(userData.name), pageW / 2, 76, { align: 'center' })
 
     doc.setFontSize(10)
     doc.setTextColor(60, 60, 60)
     const info = [
-      ['🎯 Objetivo', `Perder ${form.kgPerder} kg`],
-      ['🔥 Meta calórica', `${nutrition.targetCalories} kcal/dia`],
-      ['📅 Duração', `${plan.length} dias`],
-      ['💪 IMC', `${nutrition.bmi.value} — ${nutrition.bmi.classification}`],
+      ['Objetivo', `Perder ${form.kgPerder} kg`],
+      ['Meta calórica', `${nutrition.targetCalories} kcal/dia`],
+      ['Duração', `${plan.length} dias`],
+      ['IMC', `${nutrition.bmi.value} — ${nutrition.bmi.classification}`],
     ]
     let y = 90
     info.forEach(([l, v]) => {
       doc.setFillColor(248, 250, 252)
       doc.roundedRect(m, y - 5, cW, 11, 1, 1, 'F')
       doc.setFont('helvetica', 'bold')
-      doc.text(l, m + 3, y + 2)
+      doc.text(cleanTextForPDF(l), m + 3, y + 2)
       doc.setFont('helvetica', 'normal')
-      doc.text(v, pageW - m - 3, y + 2, { align: 'right' })
+      doc.text(cleanTextForPDF(v), pageW - m - 3, y + 2, { align: 'right' })
       y += 14
     })
 
@@ -236,11 +242,11 @@ export default function Home() {
         doc.setFont('helvetica', 'bold')
         doc.setFontSize(8)
         doc.setTextColor(22, 163, 74)
-        doc.text(`${info.emoji} ${info.label.toUpperCase()}`, m + 6, dy + 7)
+        doc.text(cleanTextForPDF(info.label.toUpperCase()), m + 6, dy + 7)
         doc.setFont('helvetica', 'bold')
         doc.setFontSize(10)
         doc.setTextColor(15, 23, 42)
-        doc.text(recipe.name, m + 6, dy + 15)
+        doc.text(cleanTextForPDF(recipe.name), m + 6, dy + 15)
         doc.setFont('helvetica', 'normal')
         doc.setFontSize(8)
         doc.setTextColor(100, 116, 139)
@@ -254,7 +260,7 @@ export default function Home() {
         doc.setFont('helvetica', 'bold')
         doc.setFontSize(9)
         doc.setTextColor(22, 163, 74)
-        doc.text(`🥬 SUCO DETOX: ${day.detoxJuice.name}`, m + 4, dy + 13)
+        doc.text(`SUCO DETOX: ${cleanTextForPDF(day.detoxJuice.name)}`, m + 4, dy + 13)
         dy += 24
       }
 
