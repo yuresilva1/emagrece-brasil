@@ -84,3 +84,4 @@ Após o deploy, acesse `/admin` e faça upload dos seus PDFs:
 - **Quantos kg quer perder** (slider 1–50 kg)
 - **O que mais incomoda** (barriga, coxas, braços, costas, quadril, rosto, pernas, corpo todo)
 - **Duração do plano** (5, 10 ou 20 dias)
+# emagrece-brasil
