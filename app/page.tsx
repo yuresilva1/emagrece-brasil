@@ -9,7 +9,6 @@ import type { UserData, NutritionData } from '@/lib/calculator'
 import type { RecipesByCategory } from '@/lib/supabase'
 import type { MealPlanDay } from '@/lib/planner'
 
-// ── Tipos estendidos para o novo formulário ──────────────────
 interface FormData {
   nomeCompleto: string
   idade: string
@@ -20,9 +19,10 @@ interface FormData {
   dias: 5 | 10 | 20
 }
 
-interface UserProfile {
+interface CustomUser {
   id: string
-  email: string
+  username: string
+  name?: string
   has_plan_10: boolean
   has_plan_20: boolean
 }
@@ -51,12 +51,10 @@ type Screen = 'splash' | 'login' | 'form' | 'loading' | 'plan'
 
 export default function Home() {
   const [screen, setScreen]           = useState<Screen>('splash')
-  const [session, setSession]         = useState<any>(null)
-  const [profile, setProfile]         = useState<UserProfile | null>(null)
+  const [user, setUser]               = useState<CustomUser | null>(null)
   
   // Auth Form State
-  const [authTab, setAuthTab]         = useState<'signin' | 'signup'>('signin')
-  const [email, setEmail]             = useState('')
+  const [username, setUsername]       = useState('')
   const [password, setPassword]       = useState('')
   const [authLoading, setAuthLoading] = useState(false)
 
@@ -80,51 +78,49 @@ export default function Home() {
   const [paying, setPaying]           = useState(false)
   const [pixCopied, setPixCopied]     = useState(false)
 
-  // ── Carrega Sessão Inicial ────────────────────────────────
+  // ── Carrega Sessão Local do Navegador ──────────────────────
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      if (session) fetchProfile(session.user.id)
-    })
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-      if (session) {
-        fetchProfile(session.user.id)
-      } else {
-        setProfile(null)
+    const savedUser = localStorage.getItem('emagrece_brasil_user')
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser)
+        setUser(parsed)
+        // Recarrega dados atualizados do banco para garantir que pegamos compras recentes
+        refreshUserData(parsed.id)
+      } catch {
+        localStorage.removeItem('emagrece_brasil_user')
       }
-    })
-
-    return () => subscription.unsubscribe()
+    }
   }, [])
 
   // ── Redirecionamento Inicial ─────────────────────────────
   useEffect(() => {
     const t = setTimeout(() => {
-      if (session) {
+      if (localStorage.getItem('emagrece_brasil_user')) {
         setScreen('form')
       } else {
         setScreen('login')
       }
     }, 2400)
     return () => clearTimeout(t)
-  }, [session])
+  }, [])
 
-  // ── Busca Perfil do Usuário ──────────────────────────────
-  async function fetchProfile(userId: string) {
+  // ── Recarrega dados do usuário ───────────────────────────
+  async function refreshUserData(userId: string) {
     try {
       const { data, error } = await supabase
-        .from('profiles')
+        .from('users')
         .select('*')
         .eq('id', userId)
         .single()
-      
+
       if (error) throw error
-      setProfile(data)
+      if (data) {
+        setUser(data)
+        localStorage.setItem('emagrece_brasil_user', JSON.stringify(data))
+      }
     } catch (e) {
-      console.warn('Erro ao carregar perfil, tentando novamente em 2s...')
-      setTimeout(() => fetchProfile(userId), 2000)
+      console.warn('Erro ao atualizar usuário do banco:', e)
     }
   }
 
@@ -150,30 +146,37 @@ export default function Home() {
     setTimeout(() => setToast(null), 3000)
   }, [])
 
-  // ── Login / Cadastro ─────────────────────────────────────
-  async function handleAuth(e: React.FormEvent) {
+  // ── Login Customizado por Usuário/Senha ─────────────────
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
-    if (!email || !password || password.length < 6) {
-      showToast('Preencha os campos (mínimo 6 caracteres de senha).', 'err')
+    if (!username || !password) {
+      showToast('Preencha o usuário e a senha.', 'err')
       return
     }
 
     setAuthLoading(true)
     try {
-      if (authTab === 'signin') {
-        const { error } = await supabase.auth.signInWithPassword({ email, password })
-        if (error) throw error
-        showToast('Acesso autorizado! Bem-vindo(a).')
-        setScreen('form')
-      } else {
-        const { error } = await supabase.auth.signUp({ email, password })
-        if (error) throw error
-        showToast('Conta criada com sucesso! Faça login agora.')
-        setAuthTab('signin')
-        setPassword('')
+      const cleanedUsername = username.trim().toLowerCase()
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('username', cleanedUsername)
+        .eq('password', password)
+        .maybeSingle()
+
+      if (error) throw error
+
+      if (!data) {
+        showToast('Usuário ou senha inválidos. Solicite seu acesso.', 'err')
+        return
       }
+
+      setUser(data)
+      localStorage.setItem('emagrece_brasil_user', JSON.stringify(data))
+      showToast('Acesso autorizado! Bem-vindo(a).')
+      setScreen('form')
     } catch (err: any) {
-      showToast(err.message || 'Falha na autenticação', 'err')
+      showToast(err.message || 'Erro ao realizar login', 'err')
     } finally {
       setAuthLoading(false)
     }
@@ -200,9 +203,9 @@ export default function Home() {
       return
     }
 
-    // Plano de 10 dias necessita de compra
+    // Plano de 10 dias
     if (days === 10) {
-      if (profile?.has_plan_10 || profile?.has_plan_20) {
+      if (user?.has_plan_10 || user?.has_plan_20) {
         setForm(f => ({ ...f, dias: 10 }))
       } else {
         setPaywallDays(10)
@@ -210,9 +213,9 @@ export default function Home() {
       }
     }
 
-    // Plano de 20 dias necessita de compra
+    // Plano de 20 dias
     if (days === 20) {
-      if (profile?.has_plan_20) {
+      if (user?.has_plan_20) {
         setForm(f => ({ ...f, dias: 20 }))
       } else {
         setPaywallDays(20)
@@ -223,10 +226,9 @@ export default function Home() {
 
   // ── Simula Compra com Pix ────────────────────────────────
   async function simulatePayment() {
-    if (!profile) return
+    if (!user) return
     setPaying(true)
     
-    // Simula validação e aprovação do Pix em 3 segundos
     setTimeout(async () => {
       try {
         const updateData = paywallDays === 10 
@@ -234,19 +236,18 @@ export default function Home() {
           : { has_plan_20: true }
 
         const { error } = await (supabase as any)
-          .from('profiles')
+          .from('users')
           .update(updateData)
-          .eq('id', profile.id)
+          .eq('id', user.id)
 
         if (error) throw error
 
-        // Atualiza estado local do perfil
-        setProfile(prev => prev ? { ...prev, ...updateData } : null)
+        const updatedUser = { ...user, ...updateData }
+        setUser(updatedUser)
+        localStorage.setItem('emagrece_brasil_user', JSON.stringify(updatedUser))
         
-        // Atualiza formulário com a duração comprada
         setForm(f => ({ ...f, dias: paywallDays }))
-        
-        showToast(`🎉 Plano de ${paywallDays} dias liberado permanentemente!`)
+        showToast(`🎉 Plano de ${paywallDays} dias liberado!`)
         setShowPaywall(false)
       } catch (err: any) {
         showToast('Erro ao liberar plano. Tente novamente.', 'err')
@@ -257,13 +258,66 @@ export default function Home() {
     }, 3000)
   }
 
-  // ── Copiar Chave Pix ─────────────────────────────────────
+  // ── Gerador de Código Pix Estático (BR Code) ──────────────
+  function generatePixPayload(key: string, name: string, city: string, amount: number, reference: string = 'FITPLANNER'): string {
+    const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase()
+    
+    // Constrói tags EMV
+    const buildTag = (id: string, value: string) => {
+      const len = value.length.toString().padStart(2, '0')
+      return id + len + value
+    }
+
+    const payloadParts = [
+      '000201', // Payload Format Indicator
+      buildTag('26', 
+        buildTag('00', 'br.gov.bcb.pix') + 
+        buildTag('01', key.trim())
+      ),
+      buildTag('52', '0000'), // Merchant Category Code
+      buildTag('53', '986'),  // Currency (BRL)
+      buildTag('54', amount.toFixed(2)), // Amount (9.00 ou 12.00)
+      buildTag('58', 'BR'),  // Country Code
+      buildTag('59', norm(name).substring(0, 25)), // Beneficiário
+      buildTag('60', norm(city).substring(0, 15)), // Cidade
+      buildTag('62', buildTag('05', norm(reference).substring(0, 25))) // Referência
+    ]
+
+    const incompletePayload = payloadParts.join('') + '6304'
+
+    // Cálculo do CRC16 CCITT
+    let crc = 0xFFFF
+    for (let i = 0; i < incompletePayload.length; i++) {
+      const charCode = incompletePayload.charCodeAt(i)
+      for (let j = 0; j < 8; j++) {
+        const bit = ((charCode >> (7 - j) & 1) === 1)
+        const c15 = ((crc >> 15 & 1) === 1)
+        crc <<= 1
+        if (c15 !== bit) crc ^= 0x1021
+      }
+    }
+    crc &= 0xFFFF
+    const crcHex = crc.toString(16).toUpperCase().padStart(4, '0')
+
+    return incompletePayload + crcHex
+  }
+
+  // ── Copiar Chave Pix Dinâmica ────────────────────────────
   function copyPixKey() {
-    const randomPixCode = "00020126580014BR.GOV.BCB.PIX0136ziylzgdhushrsgxthhyd-supabase-checkout5204000053039865405" + (paywallDays === 10 ? "9.00" : "12.00") + "5802BR5915EMAGRECEBRASIL6009SAOPAULO62070503FIT"
-    navigator.clipboard.writeText(randomPixCode)
-    setPixCopied(true)
-    showToast('Chave Pix copiada para a área de transferência!')
-    setTimeout(() => setPixCopied(false), 2000)
+    const pixKey  = process.env.NEXT_PUBLIC_PIX_KEY || '12345678000199'
+    const pixName = process.env.NEXT_PUBLIC_PIX_NAME || 'EMAGRECE BRASIL'
+    const pixCity = process.env.NEXT_PUBLIC_PIX_CITY || 'SAO PAULO'
+    const value   = paywallDays === 10 ? 9.00 : 12.00
+
+    try {
+      const pixCode = generatePixPayload(pixKey, pixName, pixCity, value)
+      navigator.clipboard.writeText(pixCode)
+      setPixCopied(true)
+      showToast('Pix Copia e Cola copiado com sucesso! Abra seu banco.')
+      setTimeout(() => setPixCopied(false), 2000)
+    } catch {
+      showToast('Erro ao gerar código Pix. Copie o CNPJ direto.', 'err')
+    }
   }
 
   // ── Submissão do Formulário ───────────────────────────────
@@ -306,7 +360,7 @@ export default function Home() {
             setCurrentDay(0)
             setScreen('plan')
           } catch {
-            showToast('Erro ao gerar o plano. Tente novamente.', 'err')
+            showToast('Erro ao gerar o plano.', 'err')
             setScreen('form')
           }
         }, 400)
@@ -314,25 +368,22 @@ export default function Home() {
     }, 420)
   }
 
-  // ── Seleciona dia ─────────────────────────────────────────
   function selectDay(i: number) {
     setCurrentDay(i)
     setExpanded({})
   }
 
-  // ── Expande receita ───────────────────────────────────────
   function toggleExpand(id: string) {
     setExpanded(e => ({ ...e, [id]: !e[id] }))
   }
 
-  // ── Download PDF ──────────────────────────────────────────
   async function handlePDF() {
     if (!plan.length || !userData || !nutrition) return
     setPdfLoading(true)
     try {
       const { jsPDF } = (await import('jspdf')).default ? await import('jspdf') : { jsPDF: (window as any).jspdf?.jsPDF }
       generatePDF(new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' }))
-      showToast('✅ PDF baixado com sucesso!')
+      showToast('✅ PDF baixado!')
     } catch {
       showToast('Erro ao gerar PDF.', 'err')
     } finally {
@@ -384,7 +435,6 @@ export default function Home() {
       y += 14
     })
 
-    // Dias
     plan.forEach(day => {
       doc.addPage()
       doc.setFillColor(34, 197, 94)
@@ -439,10 +489,10 @@ export default function Home() {
     doc.save(`emagrece-brasil-${name}.pdf`)
   }
 
-  // ── Logout ───────────────────────────────────────────────
-  async function handleLogout() {
+  function handleLogout() {
     if (confirm('Deseja realmente sair da sua conta?')) {
-      await supabase.auth.signOut()
+      localStorage.removeItem('emagrece_brasil_user')
+      setUser(null)
       setScreen('login')
     }
   }
@@ -467,53 +517,26 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ══ LOGIN / CADASTRO ══ */}
+      {/* ══ LOGIN ══ */}
       <section id="screen-login" className={`screen ${screen === 'login' ? 'active' : ''}`} style={{ justifyContent: 'center', padding: 24 }}>
         <div style={{ background: '#fff', borderRadius: 16, padding: '24px 20px', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
             <Image src="/logo.png" alt="Logo" width={56} height={56} style={{ objectFit: 'contain', margin: '0 auto' }} />
-            <h2 style={{ fontSize: 20, fontWeight: 900, color: 'var(--green-dark)', marginTop: 8 }}>Emagrece Brasil</h2>
-            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Crie sua conta ou faça login para começar</p>
+            <h2 style={{ fontSize: 20, fontWeight: 900, color: 'var(--green-dark)', marginTop: 8 }}>Acesse sua Conta</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Digite seu usuário e senha fornecidos para entrar</p>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, background: 'var(--bg)', padding: 4, borderRadius: 10, marginBottom: 18 }}>
-            <button 
-              type="button"
-              onClick={() => setAuthTab('signin')}
-              style={{
-                padding: '8px', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700,
-                background: authTab === 'signin' ? '#fff' : 'transparent',
-                color: authTab === 'signin' ? 'var(--green-dark)' : 'var(--text-muted)',
-                cursor: 'pointer'
-              }}
-            >
-              Entrar
-            </button>
-            <button 
-              type="button"
-              onClick={() => setAuthTab('signup')}
-              style={{
-                padding: '8px', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700,
-                background: authTab === 'signup' ? '#fff' : 'transparent',
-                color: authTab === 'signup' ? 'var(--green-dark)' : 'var(--text-muted)',
-                cursor: 'pointer'
-              }}
-            >
-              Criar Conta
-            </button>
-          </div>
-
-          <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div className="field">
-              <label className="field-label" htmlFor="email">E-mail</label>
+              <label className="field-label" htmlFor="username">Usuário</label>
               <div className="input-wrap">
                 <input 
-                  id="email"
-                  type="email" 
-                  placeholder="seuemail@provedor.com" 
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  autoComplete="email"
+                  id="username"
+                  type="text" 
+                  placeholder="Nome de usuário" 
+                  value={username}
+                  onChange={e => setUsername(e.target.value)}
+                  autoComplete="username"
                   required
                 />
               </div>
@@ -525,7 +548,7 @@ export default function Home() {
                 <input 
                   id="password"
                   type="password" 
-                  placeholder="Minimo 6 caracteres" 
+                  placeholder="Digite sua senha" 
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   autoComplete="current-password"
@@ -544,7 +567,7 @@ export default function Home() {
                 boxShadow: 'var(--shadow-green)', marginTop: 8
               }}
             >
-              {authLoading ? 'Processando...' : authTab === 'signin' ? 'ENTRAR' : 'CRIAR MINHA CONTA'}
+              {authLoading ? 'Verificando...' : 'ENTRAR'}
             </button>
           </form>
         </div>
@@ -571,7 +594,7 @@ export default function Home() {
 
         <div className="form-hero">
           <h2 className="form-hero-title">Vamos criar seu plano! 💪</h2>
-          <p className="form-hero-sub">Preencha seus dados para um plano 100% personalizado</p>
+          <p style={{ fontSize: 12, color: 'var(--green-dark)', fontWeight: 'bold' }}>👤 Logado como: @{user?.username}</p>
         </div>
 
         <div className="form-body">
@@ -716,10 +739,10 @@ export default function Home() {
               >
                 <span className="dur-num">10</span>
                 <span className="dur-text">dias</span>
-                {profile?.has_plan_10 || profile?.has_plan_20 ? (
+                {user?.has_plan_10 || user?.has_plan_20 ? (
                   <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
                 ) : (
-                  <span className="dur-badge">R$ 9,00</span>
+                  <span className="dur-badge">R$ 9,00/mês</span>
                 )}
               </button>
 
@@ -730,10 +753,10 @@ export default function Home() {
               >
                 <span className="dur-num">20</span>
                 <span className="dur-text">dias</span>
-                {profile?.has_plan_20 ? (
+                {user?.has_plan_20 ? (
                   <span className="dur-badge" style={{ background: 'var(--green-light)', color: 'var(--green-dark)' }}>Liberado</span>
                 ) : (
-                  <span className="dur-badge">R$ 12,00</span>
+                  <span className="dur-badge">R$ 9,00/mês</span>
                 )}
               </button>
             </div>
@@ -1007,37 +1030,41 @@ export default function Home() {
 
             <div style={{ textAlign: 'center', marginBottom: 20 }}>
               <p style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>
-                O plano de 5 dias é grátis. Para acessar o plano completo de <strong>{paywallDays} dias</strong> e recebê-lo permanentemente em sua conta:
+                O plano de 5 dias é grátis. Para acessar o plano de <strong>{paywallDays} dias</strong> você precisa assinar o nosso plano mensal:
               </p>
               <div style={{ background: 'var(--green-light)', display: 'inline-block', padding: '12px 24px', borderRadius: 16 }}>
-                <span style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Pagamento Único via PIX</span>
-                <div style={{ fontSize: 32, fontWeight: 900, color: 'var(--green-dark)', marginTop: 2 }}>
-                  R$ {paywallDays === 10 ? '9,00' : '12,00'}
+                <span style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Assinatura Mensal</span>
+                <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--green-dark)', marginTop: 2 }}>
+                  R$ {paywallDays === 10 ? '9,00' : '12,00'} / mês
                 </div>
               </div>
             </div>
 
-            {/* Código QR Pix Simulado */}
+            {/* Link de Pagamento do InfinitePay */}
             <div style={{ background: 'var(--bg)', borderRadius: 16, padding: 16, textAlign: 'center', marginBottom: 20, border: '1px solid var(--border)' }}>
-              <div style={{ width: 140, height: 140, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 44 }}>
-                📱
-              </div>
-              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
-                Escaneie o QR Code acima ou copie a chave Pix Copia e Cola para pagar em seu banco.
+              <div style={{ fontSize: 32, marginBottom: 8 }}>💳</div>
+              <p style={{ fontSize: 13, fontWeight: 'bold', color: 'var(--text-2)', marginBottom: 10 }}>
+                Toque no botão abaixo para abrir a página de pagamento seguro no InfinitePay.
               </p>
               
-              <button
-                onClick={copyPixKey}
+              <a
+                href="https://invoice.infinitepay.io/plans/comfortclean-pvai/CTO0eeKjET"
+                target="_blank"
+                rel="noopener noreferrer"
                 style={{
-                  padding: '10px 16px', background: pixCopied ? 'var(--green-light)' : '#fff',
-                  border: `1.5px solid ${pixCopied ? 'var(--green)' : 'var(--border)'}`,
-                  borderRadius: 10, color: pixCopied ? 'var(--green-dark)' : 'var(--text-2)',
-                  fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%'
+                  display: 'block', padding: '14px 16px', background: '#fff',
+                  border: '2px solid #5b21b6', textDecoration: 'none',
+                  borderRadius: 10, color: '#5b21b6',
+                  fontSize: 14, fontWeight: 800, textAlign: 'center'
                 }}
               >
-                {pixCopied ? '✓ Copiado!' : '📋 Copiar Código Pix Copia e Cola'}
-              </button>
+                💳 IR PARA O INFINITEPAY
+              </a>
             </div>
+
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', marginBottom: 12 }}>
+              Depois de confirmar o pagamento no InfinitePay, toque no botão abaixo para liberar seu acesso.
+            </p>
 
             <button
               onClick={simulatePayment}
@@ -1051,9 +1078,9 @@ export default function Home() {
               {paying ? (
                 <>
                   <span className="spinner" />
-                  Verificando Pix...
+                  Liberando acesso...
                 </>
-              ) : '💸 JÁ PAGUEI (Confirmar Pagamento)'}
+              ) : '✅ JÁ ASSINEI, LIBERAR MEU PLANO'}
             </button>
           </div>
         </div>
